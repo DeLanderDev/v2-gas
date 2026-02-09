@@ -26,8 +26,13 @@ from xgboost import XGBRegressor
 
 from config import (
     METRICS_FILE,
+    MIN_EDGE_THRESHOLD,
     MIN_TRAINING_WEEKS,
     MODEL_FILE,
+    MOVE_THRESHOLD,
+    STRIKE_RANGE_ABOVE,
+    STRIKE_RANGE_BELOW,
+    STRIKE_STEP,
     VALIDATION_WEEKS,
     XGBOOST_PARAMS,
 )
@@ -36,6 +41,7 @@ from feature_engine import (
     get_feature_columns,
     prepare_prediction_row,
 )
+from binary_model import BinaryHeads, generate_strikes, build_contract_table
 
 warnings.filterwarnings("ignore")
 
@@ -124,6 +130,11 @@ class GasPriceModel:
         self.validation_results: Optional[pd.DataFrame] = None
         self.is_trained: bool = False
 
+        # Binary classification heads for Kalshi contracts
+        self.binary_heads: Optional[BinaryHeads] = None
+        self.binary_strikes: List[float] = []
+        self.binary_metrics: Dict = {}
+
     # ─── Data Prep ────────────────────────────────────────────────────────
 
     def _prep(self, df):
@@ -205,6 +216,25 @@ class GasPriceModel:
             "n_selected_features": len(self.sel_features),
             "trained_at": datetime.now().isoformat(),
         }
+
+        # ── Train binary classification heads ──────────────────────────────
+        current_price = float(bases.iloc[-1])
+        self.binary_strikes = generate_strikes(
+            current_price,
+            step=STRIKE_STEP,
+            n_above=STRIKE_RANGE_ABOVE,
+            n_below=STRIKE_RANGE_BELOW,
+        )
+
+        self.binary_heads = BinaryHeads()
+        binary_stats = self.binary_heads.train(
+            X, y_abs, bases, names,
+            strikes=self.binary_strikes,
+            move_threshold=MOVE_THRESHOLD,
+        )
+        self.binary_metrics = binary_stats
+        self.metrics["binary_n_strikes"] = binary_stats.get("n_trained_strikes", 0)
+
         return self.metrics
 
     # ─── Walk-Forward Validation ──────────────────────────────────────────
@@ -382,7 +412,7 @@ class GasPriceModel:
                 days_to_sun = 7
             target_date = today + timedelta(days=days_to_sun)
 
-        return {
+        result = {
             "prediction": round(prediction, 4),
             "raw_prediction": round(current_price + raw, 4),
             "predicted_change": round(final_change, 4),
@@ -417,6 +447,13 @@ class GasPriceModel:
                 )[0]
             ), 5),
         }
+
+        # Add binary classification probabilities
+        if self.binary_heads and self.binary_heads.is_trained:
+            result["binary_probs"] = self.binary_heads.predict_probs(row)
+            result["binary_strikes"] = self.binary_strikes
+
+        return result
 
     # ─── Feature Importance ───────────────────────────────────────────────
 

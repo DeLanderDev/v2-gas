@@ -92,3 +92,10 @@ VALIDATION_WEEKS = 26
 MIN_TRAINING_WEEKS = 52
 MIN_DATA_POINTS = 52
 DEFAULT_HISTORY_YEARS = 5
+
+# ─── Binary Classification Heads ────────────────────────────────────────────
+STRIKE_STEP = 0.05          # $0.05 increments (Kalshi standard)
+STRIKE_RANGE_ABOVE = 4      # Number of strikes above current price
+STRIKE_RANGE_BELOW = 4      # Number of strikes below current price
+MOVE_THRESHOLD = 0.02       # Movement threshold in dollars (±2c)
+MIN_EDGE_THRESHOLD = 0.03   # Minimum edge to flag as trade opportunity
