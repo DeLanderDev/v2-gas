@@ -11,6 +11,7 @@ Key design decisions:
   4. Recent-data weighting: last 40% of data gets 2x weight
 """
 
+import calendar
 import json
 import warnings
 from datetime import datetime, timedelta
@@ -334,8 +335,8 @@ class GasPriceModel:
 
     # ─── Prediction ───────────────────────────────────────────────────────
 
-    def predict_next_week(self, df: pd.DataFrame) -> Dict:
-        """Predict next Sunday's gas price using calibrated ensemble."""
+    def predict_next_week(self, df: pd.DataFrame, target: str = "Next Sunday") -> Dict:
+        """Predict gas price for the chosen target date using calibrated ensemble."""
         if not self.is_trained:
             raise ValueError("Model must be trained before prediction.")
 
@@ -364,10 +365,22 @@ class GasPriceModel:
         ci_95 = (prediction - 1.96 * std_err, prediction + 1.96 * std_err)
 
         today = datetime.now()
-        days_to_sun = (6 - today.weekday()) % 7
-        if days_to_sun == 0:
-            days_to_sun = 7
-        next_sun = today + timedelta(days=days_to_sun)
+        if target == "End of Month":
+            last_day = calendar.monthrange(today.year, today.month)[1]
+            target_date = today.replace(day=last_day)
+            # If today is already the last day, use next month's end
+            if today.day == last_day:
+                if today.month == 12:
+                    next_month_last = calendar.monthrange(today.year + 1, 1)[1]
+                    target_date = today.replace(year=today.year + 1, month=1, day=next_month_last)
+                else:
+                    next_month_last = calendar.monthrange(today.year, today.month + 1)[1]
+                    target_date = today.replace(month=today.month + 1, day=next_month_last)
+        else:
+            days_to_sun = (6 - today.weekday()) % 7
+            if days_to_sun == 0:
+                days_to_sun = 7
+            target_date = today + timedelta(days=days_to_sun)
 
         return {
             "prediction": round(prediction, 4),
@@ -390,8 +403,8 @@ class GasPriceModel:
             "direction_accuracy": round(
                 self.metrics.get("val_direction_accuracy", 50), 1
             ),
-            "prediction_date": next_sun.strftime("%Y-%m-%d"),
-            "prediction_day": next_sun.strftime("%A, %B %d, %Y"),
+            "prediction_date": target_date.strftime("%Y-%m-%d"),
+            "prediction_day": target_date.strftime("%A, %B %d, %Y"),
             "model_1_change": round(float(
                 self.xgb_full.predict(row[self.all_features])[0]
             ), 5),
