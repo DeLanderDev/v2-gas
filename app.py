@@ -94,6 +94,13 @@ with st.sidebar:
         value=DEFAULT_HISTORY_YEARS,
     )
 
+    prediction_target = st.radio(
+        "Prediction target date",
+        options=["Next Sunday", "End of Month"],
+        index=0,
+        help="Predict the gas price for the next Sunday or the last day of the current month.",
+    )
+
     run_validation = st.checkbox("Run walk-forward validation", value=True)
 
     # ── About ─────────────────────────────────────────────────────────────
@@ -111,8 +118,7 @@ with st.sidebar:
 # ─── Main Content ────────────────────────────────────────────────────────────
 st.title("🇺🇸 US Gasoline Price Predictor")
 st.markdown(
-    "*Predicting AAA national average regular gasoline — "
-    "every Sunday at 11:59 PM ET*"
+    "*Predicting AAA national average regular gasoline*"
 )
 
 if not eia_key:
@@ -228,7 +234,7 @@ if run_validation:
 
 # ─── Prediction ───────────────────────────────────────────────────────────────
 try:
-    prediction = model.predict_next_week(data)
+    prediction = model.predict_next_week(data, target=prediction_target)
 except Exception as e:
     st.error(f"❌ Error generating prediction: {str(e)}")
     st.stop()
@@ -330,7 +336,7 @@ summary = (
     f"The model predicts gas prices will go "
     f"**<span style='color:{dir_color}'>{display['predicted_change']:+.3f}/gal "
     f"({display['direction']})</span>** "
-    f"by Sunday **{display['prediction_day']}**, "
+    f"by **{display['prediction_day']}**, "
     f"from ${display['current_price']:.3f} → "
     f"**${display['prediction']:.3f}** per gallon.  \n"
     f"95% confidence interval: "
