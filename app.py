@@ -15,10 +15,11 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from datetime import datetime, timedelta
 
-from config import DEFAULT_HISTORY_YEARS, MIN_DATA_POINTS
+from config import DEFAULT_HISTORY_YEARS, MIN_DATA_POINTS, MIN_EDGE_THRESHOLD
 from data_collector import build_combined_dataset
 from feature_engine import create_features, get_feature_columns
 from model import GasPriceModel
+from binary_model import calculate_ev, build_contract_table
 from prediction_log import (
     save_prediction,
     load_prediction_log,
@@ -366,9 +367,10 @@ with save_col2:
 backfill_actuals_from_data(data)
 
 # ─── Tabs ─────────────────────────────────────────────────────────────────────
-tab1, tab2, tab3, tab4, tab5, tab6 = st.tabs([
+tab1, tab2, tab3, tab4, tab5, tab6, tab7 = st.tabs([
     "📈 Price & Forecast",
     "🎯 Model Accuracy",
+    "💰 Kalshi Contracts",
     "🔍 Feature Analysis",
     "🛢️ Supply & Demand",
     "📋 Data Explorer",
@@ -555,9 +557,177 @@ with tab2:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  TAB 3: Feature Analysis
+#  TAB 3: Kalshi Contracts (Binary Classification Heads + EV Framework)
 # ═══════════════════════════════════════════════════════════════════════════════
 with tab3:
+    st.subheader("Binary Classification Heads")
+
+    binary_probs = prediction.get("binary_probs", {})
+    binary_strikes = prediction.get("binary_strikes", [])
+
+    if not binary_probs:
+        st.warning(
+            "Binary classification heads could not be trained. "
+            "This can happen if there is insufficient data variation "
+            "around the current price strikes."
+        )
+    else:
+        # Summary metrics
+        n_strike_models = model.binary_metrics.get("n_trained_strikes", 0)
+        has_move = model.binary_heads.move_model is not None if model.binary_heads else False
+
+        bc1, bc2, bc3 = st.columns(3)
+        bc1.metric("Strike Classifiers", n_strike_models)
+        bc2.metric("Movement Classifier", "Active" if has_move else "N/A")
+        bc3.metric(
+            "Current Price",
+            f"${display['current_price']:.3f}",
+        )
+
+        # ── Probability chart ─────────────────────────────────────────────
+        st.subheader("Calibrated Probabilities: Gas Price Above Strike")
+
+        strike_probs = {
+            k: v for k, v in binary_probs.items() if k.startswith("above_")
+        }
+        if strike_probs:
+            strike_labels = [k.replace("above_", "$") for k in strike_probs.keys()]
+            prob_values = list(strike_probs.values())
+
+            fig_probs = go.Figure()
+            bar_colors = [
+                "#51cf66" if p > 0.6 else ("#ffd43b" if p > 0.4 else "#ff6b6b")
+                for p in prob_values
+            ]
+            fig_probs.add_trace(go.Bar(
+                x=strike_labels,
+                y=[p * 100 for p in prob_values],
+                marker_color=bar_colors,
+                text=[f"{p:.1%}" for p in prob_values],
+                textposition="outside",
+            ))
+            fig_probs.add_hline(y=50, line_dash="dash", line_color="white", opacity=0.5)
+            fig_probs.update_layout(
+                height=400, template="plotly_dark",
+                yaxis_title="Probability (%)",
+                xaxis_title="Strike Price",
+                yaxis=dict(range=[0, 105]),
+            )
+            st.plotly_chart(fig_probs, use_container_width=True)
+
+        # Movement probability
+        move_key = [k for k in binary_probs if k.startswith("move_")]
+        if move_key:
+            move_prob = binary_probs[move_key[0]]
+            st.info(
+                f"**Movement classifier**: {move_prob:.1%} probability that gas "
+                f"moves more than +/-2c from current price"
+            )
+
+        # ── EV Calculator ─────────────────────────────────────────────────
+        st.markdown("---")
+        st.subheader("Expected Value Calculator")
+        st.markdown(
+            "Enter Kalshi market prices to calculate expected value. "
+            "Prices are in cents (e.g., 65 = $0.65 for a YES contract)."
+        )
+
+        # Build market price inputs
+        if strike_probs:
+            st.markdown("**Enter market YES prices (cents) for each strike:**")
+
+            market_prices = {}
+            cols_per_row = 4
+            strike_keys = list(strike_probs.keys())
+
+            for row_start in range(0, len(strike_keys), cols_per_row):
+                row_keys = strike_keys[row_start:row_start + cols_per_row]
+                cols = st.columns(cols_per_row)
+                for j, key in enumerate(row_keys):
+                    strike_val = key.replace("above_", "$")
+                    with cols[j]:
+                        mkt = st.number_input(
+                            f"Above {strike_val}",
+                            min_value=0, max_value=99, value=0,
+                            step=1, key=f"mkt_{key}",
+                            help=f"Kalshi YES price for 'Gas > {strike_val}'",
+                        )
+                        if mkt > 0:
+                            market_prices[key] = mkt / 100.0
+
+            if market_prices:
+                contract_df = build_contract_table(
+                    binary_probs, market_prices, min_edge=MIN_EDGE_THRESHOLD,
+                )
+
+                # Show trade signals
+                trades = contract_df[contract_df.get("trade_signal", False) == True]
+                if not trades.empty:
+                    st.success(
+                        f"**{len(trades)} trade signal(s) found** "
+                        f"(edge >= {MIN_EDGE_THRESHOLD:.0%})"
+                    )
+
+                # Display contract table
+                display_cols = [
+                    "contract", "model_prob_pct", "market_price_pct",
+                    "edge", "recommended", "best_ev", "kelly",
+                ]
+                available_cols = [c for c in display_cols if c in contract_df.columns]
+                show_df = contract_df[available_cols].copy()
+
+                # Format numeric columns
+                for col in ["edge", "best_ev", "kelly"]:
+                    if col in show_df.columns:
+                        show_df[col] = show_df[col].apply(
+                            lambda x: f"{x:+.4f}" if pd.notna(x) else "—"
+                        )
+
+                col_config = {
+                    "contract": "Contract",
+                    "model_prob_pct": "Model Prob",
+                    "market_price_pct": "Market Price",
+                    "edge": "Edge",
+                    "recommended": "Signal",
+                    "best_ev": "Best EV",
+                    "kelly": "Kelly %",
+                }
+                show_df = show_df.rename(columns=col_config)
+                st.dataframe(show_df, use_container_width=True, hide_index=True)
+
+                # Individual EV breakdown
+                with st.expander("Detailed EV Breakdown"):
+                    for key, mkt_price in market_prices.items():
+                        if key in binary_probs:
+                            ev = calculate_ev(binary_probs[key], mkt_price)
+                            strike_label = key.replace("above_", "$")
+                            rec_color = (
+                                "#51cf66" if ev["recommended"] == "YES"
+                                else ("#ff6b6b" if ev["recommended"] == "NO"
+                                      else "#666")
+                            )
+                            st.markdown(
+                                f"**Gas > {strike_label}** | "
+                                f"Model: {ev['model_prob']:.1%} vs "
+                                f"Market: {ev['market_price']:.0%} | "
+                                f"Edge: {ev['yes_edge']:+.1%} | "
+                                f"YES EV: ${ev['yes_ev']:+.4f} | "
+                                f"NO EV: ${ev['no_ev']:+.4f} | "
+                                f"<span style='color:{rec_color}'>"
+                                f"**{ev['recommended']}**</span>",
+                                unsafe_allow_html=True,
+                            )
+            else:
+                st.caption(
+                    "Enter Kalshi market prices above to see EV calculations. "
+                    "Set any strike's market price to 0 to skip it."
+                )
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  TAB 4: Feature Analysis
+# ═══════════════════════════════════════════════════════════════════════════════
+with tab4:
     st.subheader("Feature Importance")
     importance_df = model.get_feature_importance(top_n=25)
 
@@ -658,9 +828,9 @@ with tab3:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  TAB 4: Supply & Demand Dashboard
+#  TAB 5: Supply & Demand Dashboard
 # ═══════════════════════════════════════════════════════════════════════════════
-with tab4:
+with tab5:
     st.subheader("EIA Supply & Demand Indicators")
 
     has_supply_data = any(
@@ -759,9 +929,9 @@ with tab4:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  TAB 5: Data Explorer
+#  TAB 6: Data Explorer
 # ═══════════════════════════════════════════════════════════════════════════════
-with tab5:
+with tab6:
     st.subheader("Raw Data Explorer")
 
     col_a, col_b, col_c = st.columns(3)
@@ -799,9 +969,9 @@ with tab5:
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-#  TAB 6: Prediction Log & Scheduler
+#  TAB 7: Prediction Log & Scheduler
 # ═══════════════════════════════════════════════════════════════════════════════
-with tab6:
+with tab7:
     st.subheader("Saved Predictions")
 
     log_df = load_prediction_log()
